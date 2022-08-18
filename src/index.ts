@@ -7,7 +7,8 @@ import {
   IntegrationError,
   RawRequest,
   Table,
-  TableType
+  TableType,
+  ResolvedActionConfigurationProperty
 } from '@superblocksteam/shared';
 import {
   ActionConfigurationResolutionContext,
@@ -24,7 +25,9 @@ import mssql, { ConnectionPool } from 'mssql';
 export default class MicrosoftSQLPlugin extends BasePlugin {
   pluginName = 'Microsoft SQL';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async resolveActionConfigurationProperty(resolutionContext: ActionConfigurationResolutionContext): Promise<string | any[]> {
+  async resolveActionConfigurationProperty(
+    resolutionContext: ActionConfigurationResolutionContext
+  ): Promise<ResolvedActionConfigurationProperty> {
     if (!resolutionContext.actionConfiguration.usePreparedSql || resolutionContext.property !== 'body') {
       return super.resolveActionConfigurationProperty(resolutionContext);
     }
@@ -42,7 +45,7 @@ export default class MicrosoftSQLPlugin extends BasePlugin {
       bindingResolution[toEval] = `@PARAM_${bindingCount++}`;
       resolutionContext.context.preparedStatementContext.push(bindingResolutions[toEval]);
     }
-    return renderValue(propertyToResolve, bindingResolution);
+    return { resolved: renderValue(propertyToResolve, bindingResolution) };
   }
 
   async execute({
