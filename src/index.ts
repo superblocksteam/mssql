@@ -59,7 +59,7 @@ export default class MicrosoftSQLPlugin extends BasePlugin {
       const query = actionConfiguration.body;
 
       const ret = new ExecutionOutput();
-      if (isEmpty(query)) {
+      if (!query || isEmpty(query)) {
         return ret;
       }
 
@@ -111,7 +111,7 @@ export default class MicrosoftSQLPlugin extends BasePlugin {
       user: auth.username,
       password: auth.password,
       database: auth.custom.databaseName.value,
-      server: endpoint.host,
+      server: endpoint.host ?? '',
       port: Number(endpoint.port),
       requestTimeout: connectionTimeoutMillis,
       options: {
