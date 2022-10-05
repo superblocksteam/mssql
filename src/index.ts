@@ -12,85 +12,104 @@ import {
 } from '@superblocksteam/shared';
 import {
   ActionConfigurationResolutionContext,
-  BasePlugin,
+  DatabasePlugin,
   extractMustacheStrings,
   normalizeTableColumnNames,
   PluginExecutionProps,
   renderValue,
-  resolveAllBindings
+  resolveAllBindings,
+  CreateConnection,
+  DestroyConnection
 } from '@superblocksteam/shared-backend';
 import { isEmpty } from 'lodash';
 import mssql, { ConnectionPool } from 'mssql';
 
-export default class MicrosoftSQLPlugin extends BasePlugin {
+export default class MicrosoftSQLPlugin extends DatabasePlugin {
   pluginName = 'Microsoft SQL';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async resolveActionConfigurationProperty(
+  public async resolveActionConfigurationProperty(
     resolutionContext: ActionConfigurationResolutionContext
   ): Promise<ResolvedActionConfigurationProperty> {
-    if (!resolutionContext.actionConfiguration.usePreparedSql || resolutionContext.property !== 'body') {
-      return super.resolveActionConfigurationProperty(resolutionContext);
-    }
-    const propertyToResolve = resolutionContext.actionConfiguration[resolutionContext.property] ?? '';
-    const bindingResolution = {};
-    const bindingResolutions = await resolveAllBindings(
-      propertyToResolve,
-      resolutionContext.context,
-      resolutionContext.files ?? {},
-      resolutionContext.escapeStrings
+    return this.tracer.startActiveSpan(
+      'plugin.resolveActionConfigurationProperty',
+      { attributes: this.getTraceTags(), kind: 1 /* SpanKind.SERVER */ },
+      async (span) => {
+        if (!resolutionContext.actionConfiguration.usePreparedSql || resolutionContext.property !== 'body') {
+          span.end();
+          return super.resolveActionConfigurationProperty(resolutionContext);
+        }
+        const propertyToResolve = resolutionContext.actionConfiguration[resolutionContext.property] ?? '';
+        const bindingResolution = {};
+        const bindingResolutions = await resolveAllBindings(
+          propertyToResolve,
+          resolutionContext.context,
+          resolutionContext.files ?? {},
+          resolutionContext.escapeStrings
+        );
+        resolutionContext.context.preparedStatementContext = [];
+        let bindingCount = 1;
+        for (const toEval of extractMustacheStrings(propertyToResolve)) {
+          bindingResolution[toEval] = `@PARAM_${bindingCount++}`;
+          resolutionContext.context.preparedStatementContext.push(bindingResolutions[toEval]);
+        }
+        span.end();
+        return { resolved: renderValue(propertyToResolve, bindingResolution) };
+      }
     );
-    resolutionContext.context.preparedStatementContext = [];
-    let bindingCount = 1;
-    for (const toEval of extractMustacheStrings(propertyToResolve)) {
-      bindingResolution[toEval] = `@PARAM_${bindingCount++}`;
-      resolutionContext.context.preparedStatementContext.push(bindingResolutions[toEval]);
-    }
-    return { resolved: renderValue(propertyToResolve, bindingResolution) };
   }
 
-  async execute({
+  public init(): void {
+    mssql.on('error', (err) => {
+      this.logger.error(`${this.pluginName} connection errored: ${err}`);
+    });
+  }
+
+  public async execute({
     context,
     datasourceConfiguration,
     actionConfiguration
   }: PluginExecutionProps<MsSqlDatasourceConfiguration>): Promise<ExecutionOutput> {
-    let conn: ConnectionPool | undefined;
-    try {
-      conn = await this.createConnection(datasourceConfiguration);
-      const query = actionConfiguration.body;
-
-      const ret = new ExecutionOutput();
-      if (!query || isEmpty(query)) {
-        return ret;
-      }
-
-      let request = conn.request();
-      let paramCount = 1;
-      for (const param of context.preparedStatementContext) {
-        request = request.input(`PARAM_${paramCount++}`, param);
-      }
-
-      const result = await request.query(query);
-
-      ret.output = normalizeTableColumnNames(result.recordset);
-
+    const conn = await this.createConnection(datasourceConfiguration);
+    const query = actionConfiguration.body;
+    const ret = new ExecutionOutput();
+    if (!query || isEmpty(query)) {
       return ret;
+    }
+    let paramCount = 1;
+    let result;
+    try {
+      result = await this.executeQuery(async () => {
+        let request = conn.request();
+        for (const param of context.preparedStatementContext) {
+          request = request.input(`PARAM_${paramCount++}`, param);
+        }
+        return request.query(query);
+      });
     } catch (err) {
       throw new IntegrationError(`${this.pluginName} query failed, ${err.message}`);
     } finally {
       if (conn) {
-        conn.close();
+        this.destroyConnection(conn);
       }
     }
+    ret.output = normalizeTableColumnNames(result.recordset);
+    return ret;
   }
 
-  getRequest(actionConfiguration: DBActionConfiguration): RawRequest {
+  public getRequest(actionConfiguration: DBActionConfiguration): RawRequest {
     return actionConfiguration?.body;
   }
 
-  dynamicProperties(): string[] {
+  public dynamicProperties(): string[] {
     return ['body'];
   }
 
+  @DestroyConnection
+  private async destroyConnection(connection: ConnectionPool): Promise<void> {
+    await connection.close();
+  }
+
+  @CreateConnection
   private async createConnection(
     datasourceConfiguration: MsSqlDatasourceConfiguration,
     connectionTimeoutMillis = 30000
@@ -121,22 +140,25 @@ export default class MicrosoftSQLPlugin extends BasePlugin {
     };
 
     try {
-      return await mssql.connect(sqlConfig);
+      const connPool = new mssql.ConnectionPool(sqlConfig);
+      await connPool.connect();
+      return connPool;
     } catch (err) {
       throw new IntegrationError(`Failed to connect to ${this.pluginName}, ${err.message}`);
     }
   }
 
-  async metadata(datasourceConfiguration: MsSqlDatasourceConfiguration): Promise<DatasourceMetadataDto> {
-    let conn: ConnectionPool | undefined;
+  public async metadata(datasourceConfiguration: MsSqlDatasourceConfiguration): Promise<DatasourceMetadataDto> {
+    const conn = await this.createConnection(datasourceConfiguration);
+    const tables: Array<Table> = [];
+    const tablesMap: Record<string, Table> = {};
+    let resp;
     try {
-      conn = await this.createConnection(datasourceConfiguration);
-
-      const tables: Array<Table> = [];
-      const resp = await mssql.query(
-        "select table_name, column_name, data_type from information_schema.columns where table_schema != 'sys' order by ordinal_position"
-      );
-      const tablesMap: Record<string, Table> = {};
+      resp = await this.executeQuery(() => {
+        return conn.query(
+          "select table_name, column_name, data_type from information_schema.columns where table_schema != 'sys' order by ordinal_position"
+        );
+      });
 
       for (const record of resp.recordset) {
         if (tablesMap[record.table_name]) {
@@ -159,21 +181,22 @@ export default class MicrosoftSQLPlugin extends BasePlugin {
       throw new IntegrationError(`Failed to connect to ${this.pluginName}, ${err.message}`);
     } finally {
       if (conn) {
-        conn.close();
+        this.destroyConnection(conn);
       }
     }
   }
 
-  async test(datasourceConfiguration: MsSqlDatasourceConfiguration): Promise<void> {
-    let conn: ConnectionPool | undefined;
+  public async test(datasourceConfiguration: MsSqlDatasourceConfiguration): Promise<void> {
+    const conn = await this.createConnection(datasourceConfiguration);
     try {
-      conn = await this.createConnection(datasourceConfiguration);
-      await mssql.query('select name from sys.databases');
+      await this.executeQuery(() => {
+        return conn.query('select name from sys.databases');
+      });
     } catch (err) {
       throw new IntegrationError(`Test ${this.pluginName} connection failed, ${err.message}`);
     } finally {
       if (conn) {
-        conn.close();
+        this.destroyConnection(conn);
       }
     }
   }
