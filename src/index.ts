@@ -19,7 +19,8 @@ import {
   renderValue,
   resolveAllBindings,
   CreateConnection,
-  DestroyConnection
+  DestroyConnection,
+  ResolveActionConfigurationProperty
 } from '@superblocksteam/shared-backend';
 import { isEmpty } from 'lodash';
 import mssql, { ConnectionPool } from 'mssql';
@@ -27,35 +28,28 @@ import mssql, { ConnectionPool } from 'mssql';
 export default class MicrosoftSQLPlugin extends DatabasePlugin {
   pluginName = 'Microsoft SQL';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  @ResolveActionConfigurationProperty
   public async resolveActionConfigurationProperty(
     resolutionContext: ActionConfigurationResolutionContext
   ): Promise<ResolvedActionConfigurationProperty> {
-    return this.tracer.startActiveSpan(
-      'plugin.resolveActionConfigurationProperty',
-      { attributes: this.getTraceTags(), kind: 1 /* SpanKind.SERVER */ },
-      async (span) => {
-        if (!resolutionContext.actionConfiguration.usePreparedSql || resolutionContext.property !== 'body') {
-          span.end();
-          return super.resolveActionConfigurationProperty(resolutionContext);
-        }
-        const propertyToResolve = resolutionContext.actionConfiguration[resolutionContext.property] ?? '';
-        const bindingResolution = {};
-        const bindingResolutions = await resolveAllBindings(
-          propertyToResolve,
-          resolutionContext.context,
-          resolutionContext.files ?? {},
-          resolutionContext.escapeStrings
-        );
-        resolutionContext.context.preparedStatementContext = [];
-        let bindingCount = 1;
-        for (const toEval of extractMustacheStrings(propertyToResolve)) {
-          bindingResolution[toEval] = `@PARAM_${bindingCount++}`;
-          resolutionContext.context.preparedStatementContext.push(bindingResolutions[toEval]);
-        }
-        span.end();
-        return { resolved: renderValue(propertyToResolve, bindingResolution) };
-      }
+    if (!resolutionContext.actionConfiguration.usePreparedSql || resolutionContext.property !== 'body') {
+      return super.resolveActionConfigurationProperty(resolutionContext);
+    }
+    const propertyToResolve = resolutionContext.actionConfiguration[resolutionContext.property] ?? '';
+    const bindingResolution = {};
+    const bindingResolutions = await resolveAllBindings(
+      propertyToResolve,
+      resolutionContext.context,
+      resolutionContext.files ?? {},
+      resolutionContext.escapeStrings
     );
+    resolutionContext.context.preparedStatementContext = [];
+    let bindingCount = 1;
+    for (const toEval of extractMustacheStrings(propertyToResolve)) {
+      bindingResolution[toEval] = `@PARAM_${bindingCount++}`;
+      resolutionContext.context.preparedStatementContext.push(bindingResolutions[toEval]);
+    }
+    return { resolved: renderValue(propertyToResolve, bindingResolution) };
   }
 
   public init(): void {
@@ -89,7 +83,9 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
       throw new IntegrationError(`${this.pluginName} query failed, ${err.message}`);
     } finally {
       if (conn) {
-        this.destroyConnection(conn);
+        this.destroyConnection(conn).catch(() => {
+          // Error handling is done in the decorator
+        });
       }
     }
     ret.output = normalizeTableColumnNames(result.recordset);
@@ -181,7 +177,9 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
       throw new IntegrationError(`Failed to connect to ${this.pluginName}, ${err.message}`);
     } finally {
       if (conn) {
-        this.destroyConnection(conn);
+        this.destroyConnection(conn).catch(() => {
+          // Error handling is done in the decorator
+        });
       }
     }
   }
@@ -196,7 +194,9 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
       throw new IntegrationError(`Test ${this.pluginName} connection failed, ${err.message}`);
     } finally {
       if (conn) {
-        this.destroyConnection(conn);
+        this.destroyConnection(conn).catch(() => {
+          // Error handling is done in the decorator
+        });
       }
     }
   }
