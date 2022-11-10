@@ -12,7 +12,7 @@ import {
 } from '@superblocksteam/shared';
 import {
   ActionConfigurationResolutionContext,
-  DatabasePlugin,
+  DatabasePluginPooled,
   extractMustacheStrings,
   normalizeTableColumnNames,
   PluginExecutionProps,
@@ -25,7 +25,7 @@ import {
 import { isEmpty } from 'lodash';
 import mssql, { ConnectionPool } from 'mssql';
 
-export default class MicrosoftSQLPlugin extends DatabasePlugin {
+export default class MicrosoftSQLPlugin extends DatabasePluginPooled<ConnectionPool, MsSqlDatasourceConfiguration> {
   pluginName = 'Microsoft SQL';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   @ResolveActionConfigurationProperty
@@ -58,12 +58,10 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
     });
   }
 
-  public async execute({
-    context,
-    datasourceConfiguration,
-    actionConfiguration
-  }: PluginExecutionProps<MsSqlDatasourceConfiguration>): Promise<ExecutionOutput> {
-    const conn = await this.createConnection(datasourceConfiguration);
+  public async executePooled(
+    { context, actionConfiguration }: PluginExecutionProps<MsSqlDatasourceConfiguration>,
+    conn: ConnectionPool
+  ): Promise<ExecutionOutput> {
     const query = actionConfiguration.body;
     const ret = new ExecutionOutput();
     if (!query || isEmpty(query)) {
@@ -81,12 +79,6 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
       });
     } catch (err) {
       throw new IntegrationError(`${this.pluginName} query failed, ${err.message}`);
-    } finally {
-      if (conn) {
-        this.destroyConnection(conn).catch(() => {
-          // Error handling is done in the decorator
-        });
-      }
     }
     ret.output = normalizeTableColumnNames(result.recordset);
     return ret;
@@ -101,12 +93,12 @@ export default class MicrosoftSQLPlugin extends DatabasePlugin {
   }
 
   @DestroyConnection
-  private async destroyConnection(connection: ConnectionPool): Promise<void> {
+  protected async destroyConnection(connection: ConnectionPool): Promise<void> {
     await connection.close();
   }
 
   @CreateConnection
-  private async createConnection(
+  protected async createConnection(
     datasourceConfiguration: MsSqlDatasourceConfiguration,
     connectionTimeoutMillis = 30000
   ): Promise<ConnectionPool> {

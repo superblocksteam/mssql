@@ -1,6 +1,6 @@
 {
   "name": "@superblocksteam/mssql",
-  "version": "0.2389.0",
+  "version": "0.2416.0",
   "description": "Superblocks Microsoft SQL Server Plugin",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
